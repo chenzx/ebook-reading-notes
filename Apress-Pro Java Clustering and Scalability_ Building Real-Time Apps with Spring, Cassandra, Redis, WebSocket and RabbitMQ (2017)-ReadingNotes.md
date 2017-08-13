@@ -69,9 +69,10 @@ Spring子项目：https://spring.io/docs/reference
 application.yml JPA数据源配置（wtf？xml不用了？）
 
 *  `public interface UserRepository extends JpaRepository<User, String> {...}`
-    *    User findByEmail(String email); //声明一个方法，Spring Data动态实现它；
+    *  User findByEmail(String email); //声明一个方法，Spring Data动态实现它；
 
-    *    ```
+    *  定制查询
+        ```
         @Query("select u from User u where u.name like %?1")
  		List<User> findByNameEndsWith(String name);
         ```
@@ -151,13 +152,16 @@ public class ChatRoomController {
 	 }
 }
 ```
+
 ### Joining the Chat Room
 * @SubscribeMapping ？
 * SimpMessageHeaderAccessor: 获取请求参数要通过注入的这个参数类型访问ws header？？？感觉没有NodeJS/express的url route方便，不过Java没JS那么动态
 * WebSocket重连策略
-	* -
+	-
+
 ### Sending a User’s Public Messages over WebSocket
 * instantMessage.isPublic()
+
 ### Private消息发送
 * `webSocketMessagingTemplate.convertAndSendToUser(...)`
 * 目标地址被spring内部封装转换了一下？
