@@ -205,7 +205,8 @@
 			```
 		* filters（logging/metrics还好，假如用户认证需要访问数据库怎么处理呢？）
 			* pre-: TrackingFilter: 关联一个correlation ID（为什么不是客户端直接生成呢？），分布式tracing
-			* route：SpecialRoutesFilter：检测是否做A/B测试？
+			* route：SpecialRoutesFilter：检测是否做A/B测试？forward？
+				* 感觉这里的逻辑真的没有用Node.js写简单明了！
 			* post：ResponseFilter
 		* Using the correlation ID in your service calls
 			* 靠，这里的代码看着好恶心... 不就是一个随header传递的tmx-correlation-id嘛，一堆垃圾代码！
@@ -227,16 +228,191 @@
 			```
 
 			Log aggregation？Spring Cloud Sleuth？
-	* 
 
 ## Securing your microservices
+* 如何配置OAuth2前端：https://spring.io/blog/2015/02/03/sso-with-oauth2-angular-js-and-spring-security-part-v
+* 看起来，`OAuth2认证服务器`需要实现用户token与资源之间的授权关系？？？还是说仅仅处理认证？
+	* @EnableAuthorizationServer 标注Spring Boot应用
+* OAuth2 grant types：略～
+* OAuth2Config，WebSecurityConfigurerAdapter，...
+* 保护服务
+	* @EnableResourceServer
+	* ？怎样防止用户看到其他用户的敏感信息？除了使用GUID而不是数据库生成id外？
+	* 只有admin角色允许DELETE：
+	```
+	@Configuration
+	public class ResourceServerConfiguration extends
+	    	ResourceServerConfigurerAdapter {
+		@Override
+	   	public void configure(HttpSecurity http) throws Exception{
+	    	http
+	    		.authorizeRequests()
+	     		.antMatchers(HttpMethod.DELETE, "/v1/organizations/**")
+	    		.hasRole("ADMIN")
+	    		.anyRequest()
+	    		.authenticated();
+		}
+	}
+	```
+* Propagating the OAuth2 access token（by Zuul？）
+	* @EnableOAuth2Sso
+	* OAuth2RestTemplate类
+* JavaScript Web Tokens（JWT）and OAuth2
+	* http://www.baeldung.com/spring-security-oauth-jwt
+* Zone your services into Public & Private APIs（有意思）
+	* ？Public API microservices should carry out narrow tasks that are workflow-oriented
+	* private zone：部署在内网环境？双层https网关似乎并无必要（难道这样就能防止network breach？）
+	* 屏蔽不需要的inbound／outbound access ports
 
-## Event-driven architecture with Spring Cloud Stream
+## Event-driven architecture with `Spring Cloud Stream`
+* 不能使用容器内的内存作为本地缓存？faint。好吧
+* 同步请求响应：redis
+	* 缺点：紧耦合、有瓶颈、不灵活
+* 异步消息通知：kafka？
+	* 下游服务监控消息队列（订阅），用于上游改变状态后得到通知（见鬼，总感觉这里的说法有点不靠谱，好像消息队列变成万能的了）
+	* 缺点？
+		* 消息处理语义（顺序、错误异常）
+		* 消息可见性（处理可能不及时）
+		* 业务逻辑的实现可能需要重新设计（！）
+* Spring Cloud Stream介绍
+	* 架构：Publisher --> Source（默认POJO to JSON？） --> Channel --> Binder --> Message Broker --> Message Queue --> Consumer(Sink)
+	* pom配置：
+	```
+	<dependency>
+	    <groupId>org.springframework.cloud</groupId>
+	    <artifactId>spring-cloud-starter-stream-kafka</artifactId>
+	</dependency>
+	```
+	* @EnableBinding(Source.class) //import org.springframework.cloud.stream.messaging.Source; ?
+	* 将Source注入到消息Bean：
+	```
+	@Autowired
+    public SimpleSourceBean(Source source){
+        this.source = source;
+    }
+	```
+	* 发布消息：这里source对象（接口）是一个内置的channel类型？那么假如要发布到定制channel呢？
+	```
+	source
+	    .output()
+	    .send(
+	      MessageBuilder
+	        .withPayload(change)
+	        .build());
+	```
+	* 配置：bind服务到消息队列
+	```
+	spring:
+  	  application:
+      name: organizationservice
+      stream:
+      	bindings:
+      	  output:
+		    destination:  orgChangeTopic
+		    content-type: application/json
+		  kafka:
+			binder:
+			  zkNodes: localhost
+    		  brokers: localhost
+	```
+	* 最后，业务逻辑代码中使用：`simpleSourceBean.publishOrgChange("SAVE", org.getId());`
+	* 消费端：Source --> Sink
+	```
+	@EnableBinding(Sink.class)
+	public class Application { 
+	    @StreamListener(Sink.INPUT)
+	    public void loggerSink(
+	       OrganizationChangeModel orgChange) { ... } //注意这里全局的listener方法；
+	```
+	* Again，配置sink端：
+	```
+	...
+		input:
+          destination: orgChangeTopic
+          content-type: application/json
+          group: licensingGroup
+	```
+* A Spring Cloud Stream use case: distributed caching
+	* Amazon’s DynamoDB（类似于Cassandra，优化写，但读性能不佳？） + ElastiCache (Redis)
+	* 使用redis
+		* pom依赖：
+		```
+		<dependency>
+		  <groupId>org.springframework.data</groupId>
+		  <artifactId>spring-data-redis</artifactId>
+		  <version>1.7.4.RELEASE</version>
+		</dependency>
+		<dependency>
+		  <groupId>redis.clients</groupId>
+		  <artifactId>jedis</artifactId>
+		  <version>2.9.0</version>
+		</dependency>
+		<dependency>
+		  <groupId>org.apache.commons</groupId>
+		  <artifactId>commons-pool2</artifactId>
+		  <version>2.0</version>
+		</dependency>
+		```
+		* 向应用注入一个JedisConnectionFactory，并创建redisTemplate：
+		```
+		@Bean
+		public RedisTemplate<String, Object> redisTemplate() {
+        	RedisTemplate<String, Object> template = new RedisTemplate<String, Object>();
+        	template.setConnectionFactory(jedisConnectionFactory());
+        	return template;
+    	}
+		```
+		* Because you’re using `Spring Data` to access your Redis store, you need to define a repository class.
+			* 太死板了，矬
+			```
+			@Autowired
+			private OrganizationRedisRepositoryImpl(RedisTemplate redisTemplate) {
+			    this.redisTemplate = redisTemplate;
+			}
+			@PostConstruct
+			private void init() {
+				//import org.springframework.data.redis.core.HashOperations;
+    			hashOperations = redisTemplate.opsForHash(); //见鬼
+    		}
+			```
+	* Defining custom channels
+	```
+	import org.springframework.cloud.stream.annotation.Input;
+	import org.springframework.messaging.SubscribableChannel;
+
+	public interface CustomChannels {
+	    @Input("inboundOrgChanges")
+	    SubscribableChannel orgs();
+	}
+	```
+
+	如果是发布消息：
+
+	```
+	@OutputChannel(“outboundOrg”) //怎么感觉这里的标注不一致？
+	MessageChannel outboundOrg();
+	```
 
 ## Distributed tracing with Spring Cloud Sleuth and Zipkin
+* Trace ID（每个用户请求）
+* Span ID（当一个服务需要向后端多个服务发请求，Zipkin可视化用）
+* Log Aggregation 方案：
+	* ELK
+	* Graylog
+	* Splunk
+	* Sumo Logic
+	* Papertrail
+		* Why did I choose Logspout instead of using the standard Docker log driver?（作者完全是在自说自话）
+* Adding the correlation ID to the HTTP response with Zuul（略）
+...
 
 ## Deploying your microservices
+* AWS自动化部署？
+* 10.5 Beginning your build deploy/pipeline: GitHub and Travis CI
+	* 每个微服务设置单独的git仓库？
 
 ## appendix A Running a cloud on your desktop（Docker Compose）
 
 ## appendix B OAuth2 grant types
+
+本书里构建的微服务应用还真是简单，没有复杂的业务逻辑处理，或者复杂的数据设计及OLTP事务处理。期待可以看到深层次的微服务架构设计实例解析。
